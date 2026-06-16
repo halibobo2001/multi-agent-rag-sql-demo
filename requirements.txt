@@ -6,3 +6,5 @@ langgraph>=0.2
 google-genai>=1.0
 python-dotenv>=1.0
 pytest>=8.0
+jupyter>=1.0
+nbformat>=5.10

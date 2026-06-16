@@ -72,7 +72,7 @@ class SchemaRAG:
 
             client = chromadb.PersistentClient(path=str(self.persist_dir))
             self._collection = client.get_or_create_collection(
-                name="schema_knowledge",
+                name="retailrocket_schema_knowledge",
                 embedding_function=HashEmbeddingFunction(),
             )
             self._collection.upsert(

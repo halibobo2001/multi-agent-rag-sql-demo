@@ -14,11 +14,11 @@ from agentic_analytics_demo.warehouse import ensure_demo_warehouse
 
 
 EXAMPLES = [
-    "本月哪些国家转化率最高？",
-    "比较移动端和桌面端在漏斗中的流失情况。",
-    "找出德国用户最常访问的功能页面。",
-    "A/B 实验不同 variant 的收入表现如何？",
-    "各国家过去 30 天的活跃会话趋势如何？",
+    "哪些商品浏览量最高？",
+    "哪些品类的加购到购买转化率最高？",
+    "按天展示 view、addtocart、transaction 的漏斗趋势。",
+    "找出高浏览但低购买的商品，适合做推荐优化。",
+    "哪些品类贡献了最多交易访客？",
 ]
 
 
@@ -27,10 +27,20 @@ def bootstrap() -> tuple[AppConfig, AnalyticsAgentSystem]:
     load_environment()
     config = AppConfig.from_env()
     config.data_dir.mkdir(parents=True, exist_ok=True)
-    ensure_demo_warehouse(config.db_path)
+    ensure_demo_warehouse(config.db_path, dataset_dir=config.dataset_dir)
     rag = SchemaRAG(config.chroma_dir)
     rag.ensure_index()
-    llm = GeminiClient(api_key=config.gemini_api_key, model=config.gemini_model)
+    if config.llm_provider == "gvmz":
+        llm = GeminiClient(
+            api_key=config.gvmz_api_key,
+            model=config.gvmz_model,
+            provider="gvmz",
+            base_url=config.gvmz_base_url,
+        )
+    elif config.llm_provider == "fallback":
+        llm = GeminiClient(api_key="", model=config.gemini_model, provider="gemini")
+    else:
+        llm = GeminiClient(api_key=config.gemini_api_key, model=config.gemini_model, provider="gemini")
     return config, AnalyticsAgentSystem(config.db_path, rag, llm)
 
 
@@ -44,18 +54,23 @@ def main() -> None:
     st.set_page_config(page_title="Multi-Agent RAG SQL Demo", layout="wide")
     config, system = bootstrap()
 
-    st.title("Multi-Agent RAG SQL 数据分析 Demo")
-    st.caption("跨国用户行为日志分析 | Gemini + LangGraph + ChromaDB + SQLite + Plotly")
+    st.title("Retailrocket 电商行为分析 Agent Demo")
+    st.caption("推荐系统数据分析 | Gemini + LangGraph + ChromaDB + SQLite + Plotly")
 
     with st.sidebar:
         st.subheader("运行状态")
+        st.write(f"数据集: `{config.dataset_dir.name}`")
         st.write(f"数据库: `{config.db_path.name}`")
-        st.write(f"模型: `{config.gemini_model}`")
-        if config.gemini_api_key:
+        st.write(f"LLM Provider: `{config.llm_provider}`")
+        st.write(f"模型: `{config.gvmz_model if config.llm_provider == 'gvmz' else config.gemini_model}`")
+        if config.llm_provider == "gvmz" and config.gvmz_api_key:
+            st.write(f"GVMZ API: 已配置（{config.gvmz_key_source}）")
+            st.write("调用模式: `Live GVMZ`")
+        elif config.gemini_api_key:
             st.write(f"Gemini API: 已配置（{config.gemini_key_source}）")
             st.write("调用模式: `Live Gemini`")
         else:
-            st.write("Gemini API: 未配置")
+            st.write("LLM API: 未配置")
             st.write("调用模式: `fallback`")
         st.write(f"RAG: `{system.rag.backend}`")
         st.divider()

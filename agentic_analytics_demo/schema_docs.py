@@ -12,65 +12,72 @@ class SchemaDocument:
 
 SCHEMA_DOCUMENTS = [
     SchemaDocument(
-        "users",
-        "users 用户主表",
-        "users(user_id, country, language, signup_date, acquisition_channel, account_tier)。"
-        "每行代表一个注册用户。country 可用于跨国分析；account_tier 包含 free、pro、enterprise。",
-    ),
-    SchemaDocument(
-        "sessions",
-        "sessions 访问会话表",
-        "sessions(session_id, user_id, device_type, browser, session_country, started_at, duration_seconds)。"
-        "与 users 通过 user_id 关联。device_type 包含 mobile、desktop、tablet。",
-    ),
-    SchemaDocument(
         "events",
-        "events 用户行为事件表",
-        "events(event_id, session_id, event_type, page, feature, occurred_at)。"
-        "与 sessions 通过 session_id 关联。用于页面访问、功能使用、漏斗步骤和活跃行为分析。",
+        "events 电商行为事件表",
+        "events(timestamp, event_time, visitorid, event, itemid, transactionid)。"
+        "每行是 Retailrocket 用户行为事件。event 只有 view、addtocart、transaction。"
+        "visitorid 是匿名访客，itemid 是商品，transactionid 只在 transaction 事件中有值。"
     ),
     SchemaDocument(
-        "conversions",
-        "conversions 转化漏斗表",
-        "conversions(conversion_id, session_id, user_id, funnel_step, converted, revenue, occurred_at)。"
-        "funnel_step 包含 view_product、start_trial、checkout、paid。converted 为 0/1，revenue 为收入。",
+        "category_tree",
+        "category_tree 品类树",
+        "category_tree(categoryid, parentid)。categoryid 是商品品类，parentid 是上级品类；"
+        "parentid 为空代表顶层品类。可用于品类层级聚合。"
     ),
     SchemaDocument(
-        "experiments",
-        "experiments A/B 实验曝光表",
-        "experiments(experiment_id, user_id, experiment_name, variant, exposed_at)。"
-        "与 users/conversions 通过 user_id 关联，可分析不同 variant 的转化率和收入。",
+        "item_category_history",
+        "item_category_history 商品品类历史",
+        "item_category_history(timestamp, event_time, itemid, categoryid)。"
+        "来自 item_properties 中 property='categoryid' 的记录。用于分析商品所属品类随时间变化。"
     ),
     SchemaDocument(
-        "metric_conversion_rate",
-        "指标：转化率",
-        "转化率通常计算为 AVG(converted) 或 SUM(converted) / COUNT(*)，来自 conversions 表。"
-        "按国家分析时 join users；按设备分析时 join sessions。"
-        "按月份、最近、本月过滤转化数据时使用 conversions.occurred_at，不要使用 users.signup_date。",
+        "item_latest_category",
+        "item_latest_category 商品最新品类",
+        "item_latest_category(itemid, categoryid, observed_at)。每个商品一行，是最新可见 categoryid。"
+        "常见 join：events e LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid。"
     ),
     SchemaDocument(
-        "metric_revenue",
-        "指标：收入表现",
-        "收入使用 SUM(revenue)、AVG(revenue) 或 revenue per user。实验收入分析需要 experiments join conversions。",
+        "item_availability_history",
+        "item_availability_history 商品可售状态历史",
+        "item_availability_history(timestamp, event_time, itemid, available)。"
+        "来自 item_properties 中 property='available' 的记录，available 通常为 0/1。"
     ),
     SchemaDocument(
-        "metric_activity",
-        "指标：活跃度",
-        "活跃度可使用 COUNT(DISTINCT session_id)、COUNT(*) events 或 COUNT(DISTINCT user_id)。"
-        "时间趋势通常使用 DATE(started_at) 或 DATE(occurred_at)。",
+        "item_latest_availability",
+        "item_latest_availability 商品最新可售状态",
+        "item_latest_availability(itemid, available, observed_at)。每个商品一行，用于过滤当前可售商品。"
     ),
     SchemaDocument(
-        "metric_time_fields",
-        "时间字段选择规则",
-        "用户注册分析使用 users.signup_date；会话活跃分析使用 sessions.started_at；"
-        "事件/功能访问分析使用 events.occurred_at；转化率、漏斗和收入分析使用 conversions.occurred_at；"
-        "A/B 实验曝光分析使用 experiments.exposed_at。除非用户明确问注册，否则不要用 signup_date 过滤业务结果。",
+        "metric_funnel",
+        "指标：电商漏斗",
+        "浏览量 views = SUM(event='view')；加购量 add_to_carts = SUM(event='addtocart')；"
+        "交易量 transactions = SUM(event='transaction')。加购率 = addtocart / view；购买率 = transaction / view。"
+        "注意 transaction 事件可能没有成对 addtocart，因此默认品类转化率优先使用 transaction / view。"
     ),
     SchemaDocument(
-        "join_examples",
-        "常见 Join",
-        "国家转化：users u JOIN conversions c ON u.user_id = c.user_id。"
-        "设备漏斗：sessions s JOIN conversions c ON s.session_id = c.session_id。"
-        "功能访问：sessions s JOIN users u ON s.user_id = u.user_id JOIN events e ON s.session_id = e.session_id。",
+        "metric_visitors",
+        "指标：访客与商品热度",
+        "独立访客数使用 COUNT(DISTINCT visitorid)。商品热度可用浏览量、加购量、交易量和独立访客数综合判断。"
+        "高浏览低购买商品通常是 views 高但 transactions 或 transaction/view 低。"
+    ),
+    SchemaDocument(
+        "metric_category",
+        "指标：品类分析",
+        "按品类分析时使用 item_latest_category 连接 events。"
+        "示例：events e LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid GROUP BY ic.categoryid。"
+    ),
+    SchemaDocument(
+        "metric_time",
+        "时间字段规则",
+        "所有行为时间过滤优先使用 events.event_time。属性历史使用 item_category_history.event_time 或 item_availability_history.event_time。"
+        "Retailrocket 原始时间戳是毫秒，SQLite 仓库已转成 event_time 文本。"
+        "数据大致覆盖 2015 年 5 月到 2015 年 9 月；不要使用 date('now') 过滤该历史数据。"
+    ),
+    SchemaDocument(
+        "sql_examples",
+        "常见 SQL 模式",
+        "商品热度：FROM events WHERE event='view' GROUP BY itemid。"
+        "品类转化：events e LEFT JOIN item_latest_category ic ON e.itemid=ic.itemid，然后按 categoryid 聚合 view/addtocart/transaction。"
+        "漏斗趋势：SELECT DATE(event_time), event, COUNT(*) FROM events GROUP BY DATE(event_time), event。"
     ),
 ]

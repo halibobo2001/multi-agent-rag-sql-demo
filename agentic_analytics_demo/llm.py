@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,11 +20,19 @@ class SQLGeneration:
 
 
 class GeminiClient:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.5-flash"):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-2.5-flash",
+        provider: str = "gemini",
+        base_url: str = "https://gvmz.systems/v1",
+    ):
         self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.provider = provider
+        self.base_url = base_url.rstrip("/")
         self._client = None
-        if self.api_key:
+        if self.api_key and self.provider == "gemini":
             try:
                 from google import genai
 
@@ -33,6 +42,8 @@ class GeminiClient:
 
     @property
     def is_live(self) -> bool:
+        if self.provider == "gvmz":
+            return bool(self.api_key)
         return self._client is not None
 
     def generate_sql(
@@ -45,8 +56,11 @@ class GeminiClient:
             return fallback_sql_generation(question)
 
         prompt = _build_sql_prompt(question, contexts, previous_error)
-        response = self._client.models.generate_content(model=self.model, contents=prompt)
-        payload = _extract_json(getattr(response, "text", ""))
+        try:
+            text = self._generate_text(prompt)
+        except Exception:
+            return fallback_sql_generation(question)
+        payload = _extract_json(text)
         if not payload.get("sql"):
             return fallback_sql_generation(question)
         return SQLGeneration(
@@ -57,114 +71,190 @@ class GeminiClient:
 
     def analyze(self, question: str, sql: str, dataframe: pd.DataFrame) -> str:
         if dataframe.empty:
-            return "查询成功，但没有返回符合条件的数据。可以尝试放宽时间范围或筛选条件。"
+            return "查询成功，但没有返回符合条件的数据。可以尝试放宽筛选条件，或先查看整体分布。"
         if not self.is_live:
             return fallback_analysis(question, dataframe)
 
         preview = dataframe.head(20).to_markdown(index=False)
         prompt = (
-            "你是企业级数据分析 Agent。请用中文给出 3-5 句简洁业务洞察，指出趋势、异常和可能行动。\n"
+            "你是电商推荐系统数据分析 Agent。请用中文给出 3-5 句简洁业务洞察，"
+            "指出商品/品类机会、漏斗异常和推荐优化动作。\n"
             f"用户问题: {question}\nSQL:\n{sql}\n结果预览:\n{preview}\n"
         )
+        try:
+            return self._generate_text(prompt).strip() or fallback_analysis(question, dataframe)
+        except Exception:
+            return fallback_analysis(question, dataframe)
+
+    def _generate_text(self, prompt: str) -> str:
+        if self.provider == "gvmz":
+            return self._generate_text_with_gvmz(prompt)
         response = self._client.models.generate_content(model=self.model, contents=prompt)
-        return getattr(response, "text", "").strip() or fallback_analysis(question, dataframe)
+        return getattr(response, "text", "")
+
+    def _generate_text_with_gvmz(self, prompt: str) -> str:
+        import httpx
+
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            json={
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a precise data assistant. Follow the user's output format exactly.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+            },
+            timeout=90,
+        )
+        if response.status_code in {429, 500, 502, 503, 504}:
+            time.sleep(1.5)
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a precise data assistant. Follow the user's output format exactly.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                },
+                timeout=90,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        return payload["choices"][0]["message"]["content"]
 
 
 def fallback_sql_generation(question: str) -> SQLGeneration:
     normalized = question.lower()
-    if any(word in question for word in ["转化", "转化率"]) or "conversion" in normalized:
+    if any(word in question for word in ["品类", "类目", "category", "转化", "转化率"]) or "conversion" in normalized:
         return SQLGeneration(
             sql="""
             SELECT
-                u.country,
-                ROUND(AVG(c.converted) * 100, 2) AS conversion_rate_pct,
-                COUNT(*) AS funnel_events,
-                ROUND(SUM(c.revenue), 2) AS revenue
-            FROM conversions c
-            JOIN users u ON u.user_id = c.user_id
-            WHERE DATE(c.occurred_at) >= DATE('2026-05-01')
-            GROUP BY u.country
-            ORDER BY conversion_rate_pct DESC
-            """,
-            chart_spec={"type": "bar", "x": "country", "y": "conversion_rate_pct", "title": "各国家本月转化率"},
-            rationale="Fallback matched conversion-rate country analysis.",
-        )
-    if any(word in question for word in ["移动", "桌面", "设备", "mobile", "desktop", "漏斗"]):
-        return SQLGeneration(
-            sql="""
-            SELECT
-                s.device_type,
-                c.funnel_step,
-                ROUND(AVG(c.converted) * 100, 2) AS conversion_rate_pct,
-                COUNT(*) AS attempts
-            FROM sessions s
-            JOIN conversions c ON c.session_id = s.session_id
-            GROUP BY s.device_type, c.funnel_step
-            ORDER BY c.funnel_step, s.device_type
-            """,
-            chart_spec={
-                "type": "bar",
-                "x": "funnel_step",
-                "y": "conversion_rate_pct",
-                "color": "device_type",
-                "title": "不同设备的漏斗转化率",
-            },
-            rationale="Fallback matched device funnel analysis.",
-        )
-    if "德国" in question or "germany" in normalized:
-        return SQLGeneration(
-            sql="""
-            SELECT
-                e.feature,
-                e.page,
-                COUNT(*) AS event_count
+                COALESCE(CAST(ic.categoryid AS TEXT), 'unknown') AS categoryid,
+                SUM(CASE WHEN e.event = 'view' THEN 1 ELSE 0 END) AS views,
+                SUM(CASE WHEN e.event = 'addtocart' THEN 1 ELSE 0 END) AS add_to_carts,
+                SUM(CASE WHEN e.event = 'transaction' THEN 1 ELSE 0 END) AS transactions,
+                ROUND(
+                    100.0 * SUM(CASE WHEN e.event = 'transaction' THEN 1 ELSE 0 END)
+                    / NULLIF(SUM(CASE WHEN e.event = 'view' THEN 1 ELSE 0 END), 0),
+                    2
+                ) AS purchase_rate_pct
             FROM events e
-            JOIN sessions s ON s.session_id = e.session_id
-            JOIN users u ON u.user_id = s.user_id
-            WHERE u.country = 'Germany'
-            GROUP BY e.feature, e.page
-            ORDER BY event_count DESC
-            """,
-            chart_spec={"type": "bar", "x": "feature", "y": "event_count", "color": "page", "title": "德国用户功能访问"},
-            rationale="Fallback matched Germany feature usage.",
-        )
-    if any(word in question for word in ["实验", "variant", "A/B", "ab", "收入"]):
-        return SQLGeneration(
-            sql="""
-            SELECT
-                e.experiment_name,
-                e.variant,
-                ROUND(AVG(c.converted) * 100, 2) AS conversion_rate_pct,
-                ROUND(SUM(c.revenue), 2) AS total_revenue,
-                COUNT(DISTINCT e.user_id) AS exposed_users
-            FROM experiments e
-            JOIN conversions c ON c.user_id = e.user_id
-            WHERE c.funnel_step = 'paid'
-            GROUP BY e.experiment_name, e.variant
-            ORDER BY total_revenue DESC
+            LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid
+            GROUP BY ic.categoryid
+            HAVING views >= 100
+            ORDER BY purchase_rate_pct DESC
             """,
             chart_spec={
                 "type": "bar",
-                "x": "variant",
-                "y": "total_revenue",
-                "color": "experiment_name",
-                "title": "A/B 实验收入表现",
+                "x": "categoryid",
+                "y": "purchase_rate_pct",
+                "title": "品类购买转化率",
             },
-            rationale="Fallback matched experiment revenue analysis.",
+            rationale="Fallback matched category funnel conversion analysis.",
+        )
+    if any(word in question for word in ["趋势", "按天", "日期", "漏斗", "trend"]):
+        return SQLGeneration(
+            sql="""
+            SELECT
+                DATE(event_time) AS event_date,
+                event,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT visitorid) AS unique_visitors
+            FROM events
+            GROUP BY DATE(event_time), event
+            ORDER BY event_date, event
+            """,
+            chart_spec={
+                "type": "line",
+                "x": "event_date",
+                "y": "event_count",
+                "color": "event",
+                "title": "电商行为漏斗趋势",
+            },
+            rationale="Fallback matched daily funnel trend.",
+        )
+    if any(word in question for word in ["高浏览", "低购买", "推荐", "优化", "popular"]):
+        return SQLGeneration(
+            sql="""
+            SELECT
+                e.itemid,
+                COALESCE(CAST(ic.categoryid AS TEXT), 'unknown') AS categoryid,
+                SUM(CASE WHEN e.event = 'view' THEN 1 ELSE 0 END) AS views,
+                SUM(CASE WHEN e.event = 'addtocart' THEN 1 ELSE 0 END) AS add_to_carts,
+                SUM(CASE WHEN e.event = 'transaction' THEN 1 ELSE 0 END) AS transactions,
+                ROUND(
+                    100.0 * SUM(CASE WHEN e.event = 'transaction' THEN 1 ELSE 0 END)
+                    / NULLIF(SUM(CASE WHEN e.event = 'view' THEN 1 ELSE 0 END), 0),
+                    3
+                ) AS purchase_rate_pct
+            FROM events e
+            LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid
+            GROUP BY e.itemid, ic.categoryid
+            HAVING views >= 20
+            ORDER BY purchase_rate_pct ASC, views DESC
+            """,
+            chart_spec={
+                "type": "bar",
+                "x": "itemid",
+                "y": "views",
+                "color": "categoryid",
+                "title": "高浏览低购买商品",
+            },
+            rationale="Fallback matched recommendation optimization candidates.",
+        )
+    if any(word in question for word in ["访客", "visitor", "交易访客", "购买用户"]):
+        return SQLGeneration(
+            sql="""
+            SELECT
+                COALESCE(CAST(ic.categoryid AS TEXT), 'unknown') AS categoryid,
+                COUNT(DISTINCT e.visitorid) AS unique_visitors,
+                COUNT(DISTINCT CASE WHEN e.event = 'transaction' THEN e.visitorid END) AS purchasing_visitors,
+                SUM(CASE WHEN e.event = 'transaction' THEN 1 ELSE 0 END) AS transactions
+            FROM events e
+            LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid
+            GROUP BY ic.categoryid
+            ORDER BY purchasing_visitors DESC, transactions DESC
+            """,
+            chart_spec={
+                "type": "bar",
+                "x": "categoryid",
+                "y": "purchasing_visitors",
+                "title": "品类交易访客数",
+            },
+            rationale="Fallback matched category purchasing visitor analysis.",
         )
     return SQLGeneration(
         sql="""
         SELECT
-            DATE(started_at) AS activity_date,
-            session_country AS country,
-            COUNT(DISTINCT session_id) AS active_sessions
-        FROM sessions
-        WHERE DATE(started_at) >= DATE('2026-05-01')
-        GROUP BY DATE(started_at), session_country
-        ORDER BY activity_date, active_sessions DESC
+            e.itemid,
+            COALESCE(CAST(ic.categoryid AS TEXT), 'unknown') AS categoryid,
+            COUNT(*) AS views,
+            COUNT(DISTINCT e.visitorid) AS unique_viewers
+        FROM events e
+        LEFT JOIN item_latest_category ic ON e.itemid = ic.itemid
+        WHERE e.event = 'view'
+        GROUP BY e.itemid, ic.categoryid
+        ORDER BY views DESC
         """,
-        chart_spec={"type": "line", "x": "activity_date", "y": "active_sessions", "color": "country", "title": "活跃会话趋势"},
-        rationale="Fallback defaulted to active session trend.",
+        chart_spec={"type": "bar", "x": "itemid", "y": "views", "color": "categoryid", "title": "商品浏览量排行"},
+        rationale="Fallback defaulted to top viewed items.",
     )
 
 
@@ -178,7 +268,7 @@ def fallback_analysis(question: str, dataframe: pd.DataFrame) -> str:
         top_row = dataframe.sort_values(metric, ascending=False).iloc[0]
         dimension = dataframe.columns[0]
         lines.append(f"按 {metric} 看，最高的 {dimension} 是 {top_row[dimension]}，数值为 {top_row[metric]}。")
-    lines.append("这是 fallback 分析；配置 GEMINI_API_KEY 后会生成更自然的业务洞察和行动建议。")
+    lines.append("这是 fallback 分析；配置 GEMINI_API_KEY 后会生成更自然的推荐系统业务洞察。")
     return " ".join(lines)
 
 
@@ -186,7 +276,7 @@ def _build_sql_prompt(question: str, contexts: list[RetrievedContext], previous_
     context_text = "\n\n".join(f"{ctx.title}\n{ctx.text}" for ctx in contexts)
     repair_text = f"\n上一次 SQL 错误: {previous_error}\n请修复。" if previous_error else ""
     return f"""
-你是只读 SQLite 数据分析 SQL Agent。必须只输出 JSON，不要 Markdown。
+你是只读 SQLite 电商推荐系统数据分析 SQL Agent。必须只输出 JSON，不要 Markdown。
 目标：把用户中文问题转换为安全 SQLite SQL，并给出 Plotly 图表规格。
 
 硬性规则：
@@ -195,7 +285,8 @@ def _build_sql_prompt(question: str, contexts: list[RetrievedContext], previous_
 3. 只能使用给定 Schema 中存在的表和字段。
 4. SQL 不要包含注释。
 5. 图表规格只允许 type/x/y/color/title 字段，type 为 bar/line/scatter/pie/table 之一。
-6. 时间过滤必须使用业务事实表时间：转化/收入用 conversions.occurred_at，会话活跃用 sessions.started_at，功能事件用 events.occurred_at；只有注册分析才用 users.signup_date。
+6. 时间过滤必须使用 events.event_time；Retailrocket 是 2015 年历史数据，不要使用 date('now')。
+7. 漏斗事件固定为 view、addtocart、transaction；不要编造 revenue、country、user、session、experiment 等字段。
 
 Schema 与指标上下文：
 {context_text}

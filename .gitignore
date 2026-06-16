@@ -1,6 +1,8 @@
 .env
 key.txt
+key2.txt
 data/
+dataset/
 logs/
 .pytest_cache/
 __pycache__/

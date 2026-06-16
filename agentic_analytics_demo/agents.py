@@ -134,12 +134,13 @@ class AnalyticsAgentSystem:
             state.get("contexts", []),
             previous_error=state.get("previous_error"),
         )
+        provider_label = "GVMZ" if getattr(self.llm, "provider", "") == "gvmz" else "Gemini"
         return _merge(
             state,
             generation=generation,
             sql=generation.sql,
             chart_spec=generation.chart_spec,
-            trace_item=f"SQL Generator: 生成 SQL ({'Gemini' if self.llm.is_live else 'fallback'})",
+            trace_item=f"SQL Generator: 生成 SQL ({provider_label if self.llm.is_live else 'fallback'})",
         )
 
     def _sql_validator(self, state: AgentState) -> AgentState:
@@ -188,4 +189,3 @@ def _merge(state: AgentState, trace_item: str | None = None, **updates: Any) -> 
         trace.append(trace_item)
         next_state["trace"] = trace
     return next_state
-
